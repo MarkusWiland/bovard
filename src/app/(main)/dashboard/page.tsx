@@ -1,5 +1,4 @@
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Suspense } from "react";
 import {
   Card,
   CardContent,
@@ -7,109 +6,267 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { UserAvatar } from "@/components/user-avatar";
-import { User } from "@/lib/auth";
-import { getServerSession } from "@/lib/get-session";
-import { format } from "date-fns";
-import { CalendarDaysIcon, MailIcon, ShieldIcon, UserIcon } from "lucide-react";
-import type { Metadata } from "next";
-import Link from "next/link";
-import { unauthorized } from "next/navigation";
 
-export const metadata: Metadata = {
-  title: "Dashboard",
-};
+import { StatsCards } from "./_components/stats-card";
+import { PropertiesList } from "./_components/properties-list";
+import { RecentActivity } from "./_components/recent-activity";
+import { UpcomingTasks } from "./_components/upcoming-task";
+import { QuickActions } from "./_components/quick-actions";
+
+import {
+  ActivitySkeleton,
+  PropertiesListSkeleton,
+  StatsCardsSkeleton,
+  TasksSkeleton,
+} from "./_components/skeleton-comps";
+
+import { auth } from "@/lib/auth";
+
+import { getServerSession } from "@/lib/get-session";
+import { redirect } from "next/navigation";
+import prisma from "@/lib/prisma";
+
+/* ======================================================
+   DATA FETCHING (SERVER)
+====================================================== */
+
+async function getDashboardData() {
+      const session = await getServerSession();
+      const user = session?.user;
+      if (!user) {
+        redirect("/sign-in");
+      }
+
+  const membership = await prisma.membership.findFirst({
+    where: { userId: user.id },
+    include: { organization: true },
+  });
+
+  if (!membership) {
+    throw new Error("User has no organization");
+  }
+
+  const organizationId = membership.organizationId;
+
+  /* =========================
+     PROPERTIES + UNITS
+  ========================= */
+
+  const properties = await prisma.property.findMany({
+    where: { organizationId },
+    include: {
+      units: {
+        include: {
+          tenant: true,
+          payments: {
+            orderBy: { dueDate: "desc" },
+            take: 1,
+          },
+        },
+      },
+    },
+  });
+
+  /* =========================
+     STATS
+  ========================= */
+
+  const totalProperties = properties.length;
+
+  const monthlyRent = properties
+    .flatMap((p) => p.units)
+    .reduce((sum, unit) => sum + unit.rent, 0);
+
+  const activeContracts = properties
+    .flatMap((p) => p.units)
+    .filter((u) => u.tenant).length;
+
+  const paidUnits = properties
+    .flatMap((p) => p.units)
+    .filter(
+      (u) =>
+        u.payments[0] &&
+        u.payments[0].status === "PAID"
+    ).length;
+
+  const paidPercentage =
+    activeContracts === 0
+      ? 0
+      : Math.round((paidUnits / activeContracts) * 100);
+
+  /* =========================
+     PROPERTIES LIST
+  ========================= */
+
+  const propertiesList = properties.map((p) => {
+    const totalRent = p.units.reduce(
+      (sum, u) => sum + u.rent,
+      0
+    );
+
+    const hasLatePayment = p.units.some(
+      (u) => u.payments[0]?.status === "LATE"
+    );
+
+    return {
+      id: p.id,
+      address: p.name,
+      city: p.city,
+      tenants: p.units.filter((u) => u.tenant).length,
+      rent: totalRent,
+      status: hasLatePayment ? "pending" : "paid",
+    } as const;
+  });
+
+  /* =========================
+     RECENT ACTIVITY
+  ========================= */
+
+  const recentPayments = await prisma.payment.findMany({
+    where: {
+      unit: {
+        property: {
+          organizationId,
+        },
+      },
+    },
+    include: {
+      unit: {
+        include: {
+          tenant: true,
+          property: true,
+        },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 5,
+  });
+
+  const recentActivity = recentPayments.map((p) => ({
+    id: p.id,
+    type: "payment" as const,
+    tenant: p.unit.tenant?.name ?? "Okänd",
+    property: p.unit.property.name,
+    date: p.createdAt.toISOString().split("T")[0],
+    amount: p.amount,
+  }));
+
+  /* =========================
+     UPCOMING TASKS
+  ========================= */
+
+  const upcomingContracts = await prisma.unit.findMany({
+    where: {
+      property: { organizationId },
+      contractEnd: {
+        lte: new Date(
+          Date.now() + 1000 * 60 * 60 * 24 * 60
+        ), // 60 dagar
+      },
+    },
+    include: {
+      property: true,
+    },
+    orderBy: { contractEnd: "asc" },
+    take: 5,
+  });
+
+  const upcomingTasks = upcomingContracts.map((u) => ({
+    id: u.id,
+    task: "Avtalsförnyelse",
+    property: u.property.name,
+    date: u.contractEnd.toISOString().split("T")[0],
+    priority: "high" as const,
+  }));
+
+  return {
+    stats: {
+      totalProperties,
+      monthlyRent,
+      activeContracts,
+      paidPercentage,
+    },
+    properties: propertiesList,
+    recentActivity,
+    upcomingTasks,
+  };
+}
+
+/* ======================================================
+   PAGE
+====================================================== */
 
 export default async function DashboardPage() {
-  const session = await getServerSession();
-  const user = session?.user;
-
-  if (!user) unauthorized();
+  const data = await getDashboardData();
 
   return (
-    <main className="mx-auto w-full max-w-6xl px-4 py-12">
-      <div className="space-y-6">
-        <div className="space-y-2">
-          <h1 className="text-2xl font-semibold">Dashboard</h1>
+    <div className="flex min-h-screen w-full flex-col bg-muted/40">
+      <main className="flex-1 space-y-4 p-4 sm:p-6">
+        {/* Welcome */}
+        <div>
+          <h2 className="text-3xl font-bold tracking-tight">
+            Välkommen tillbaka!
+          </h2>
           <p className="text-muted-foreground">
-            Välkommen tillbaka! Här är din kontoinformation.
+            Här är en översikt av dina fastigheter
           </p>
         </div>
-        {!user.emailVerified && <EmailVerificationAlert />}
-        <ProfileInformation user={user} />
-      </div>
-    </main>
-  );
-}
 
-interface ProfileInformationProps {
-  user: User;
-}
+        {/* Stats */}
+        <Suspense fallback={<StatsCardsSkeleton />}>
+          <StatsCards stats={data.stats} />
+        </Suspense>
 
-function ProfileInformation({ user }: ProfileInformationProps) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <UserIcon className="size-5" />
-          Profilinformation
-        </CardTitle>
-        <CardDescription>
-          Dina kontoinformation och nuvarande status
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="flex flex-col gap-6 sm:flex-row sm:items-start">
-          <div className="flex flex-col items-center gap-3">
-            <UserAvatar
-              name={user.name}
-              image={user.image}
-              className="size-32 sm:size-24"
-            />
-            {user.role && (
-              <Badge>
-                <ShieldIcon className="size-3" />
-                {user.role}
-              </Badge>
-            )}
-          </div>
+        {/* Main Grid */}
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-7">
+          <Card className="col-span-full lg:col-span-4">
+            <CardHeader>
+              <CardTitle>Dina fastigheter</CardTitle>
+              <CardDescription>
+                Översikt av alla dina hyresfastigheter
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Suspense fallback={<PropertiesListSkeleton />}>
+                <PropertiesList properties={data.properties} />
+              </Suspense>
+            </CardContent>
+          </Card>
 
-          <div className="flex-1 space-y-4">
-            <div>
-              <h3 className="text-2xl font-semibold">{user.name}</h3>
-              <p className="text-muted-foreground">{user.email}</p>
-            </div>
+          <div className="col-span-full lg:col-span-3 space-y-4">
+            <QuickActions />
 
-            <div className="space-y-2">
-              <div className="text-muted-foreground flex items-center gap-2 text-sm">
-                <CalendarDaysIcon className="size-4" />
-                Medlem sedan
-              </div>
-              <p className="font-medium">
-                {format(user.createdAt, "MMMM d, yyyy")}
-              </p>
-            </div>
+            <Card>
+              <CardHeader>
+                <CardTitle>Kommande uppgifter</CardTitle>
+                <CardDescription>
+                  Saker som kräver din uppmärksamhet
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Suspense fallback={<TasksSkeleton />}>
+                  <UpcomingTasks tasks={data.upcomingTasks} />
+                </Suspense>
+              </CardContent>
+            </Card>
           </div>
         </div>
-      </CardContent>
-    </Card>
-  );
-}
 
-function EmailVerificationAlert() {
-  return (
-    <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-4 dark:border-yellow-800/50 dark:bg-yellow-950/30">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <MailIcon className="size-5 text-yellow-600 dark:text-yellow-400" />
-          <span className="text-yellow-800 dark:text-yellow-200">
-            Vänligen verifiera din emailadress för att komma åt alla funktioner.
-          </span>
-        </div>
-        <Button size="sm" asChild>
-          <Link href="/verify-email">Verifiera Email</Link>
-        </Button>
-      </div>
+        {/* Activity */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Senaste aktiviteter</CardTitle>
+            <CardDescription>
+              Nyliga händelser i dina fastigheter
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Suspense fallback={<ActivitySkeleton />}>
+              <RecentActivity activities={data.recentActivity} />
+            </Suspense>
+          </CardContent>
+        </Card>
+      </main>
     </div>
   );
 }

@@ -62,21 +62,22 @@ export function SignUpForm() {
 
   async function onSubmit({ email, password, name }: SignUpValues) {
     setError(null);
-
+  
     const { error } = await authClient.signUp.email({
       email,
       password,
       name,
-      callbackURL: "/email-verified",
+      callbackURL: "/onboarding",
     });
-
+  
     if (error) {
       setError(error.message || "Something went wrong");
     } else {
-      toast.success("Signed up successfully");
-      router.push("/dashboard");
+      toast.success("Kontot skapat");
+      router.push("/onboarding");
     }
   }
+  
 
   const loading = form.formState.isSubmitting;
 

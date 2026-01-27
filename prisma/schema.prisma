@@ -1,8 +1,6 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// ===============================
+// GENERATOR & DATASOURCE
+// ===============================
 
 generator client {
   provider = "prisma-client-js"
@@ -14,17 +12,43 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ===============================
+// ENUMS
+// ===============================
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum PaymentStatus {
+  PAID
+  LATE
+  PENDING
+}
+
+enum UnitStatus {
+  OCCUPIED
+  VACANT
+}
+
+// ===============================
+// AUTH MODELS (BETTER AUTH)
+// ===============================
+
 model User {
-  id            String    @id
+  id            String   @id
   name          String
   email         String
   emailVerified Boolean
   image         String?
-  role          String?
   createdAt     DateTime
   updatedAt     DateTime
-  sessions      Session[]
-  accounts      Account[]
+
+  sessions    Session[]
+  accounts    Account[]
+  memberships Membership[]
 
   @@unique([email])
   @@map("user")
@@ -39,11 +63,12 @@ model Session {
   ipAddress String?
   userAgent String?
   userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([token])
-  @@map("session")
   @@index([userId])
+  @@map("session")
 }
 
 model Account {
@@ -51,7 +76,6 @@ model Account {
   accountId             String
   providerId            String
   userId                String
-  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   accessToken           String?
   refreshToken          String?
   idToken               String?
@@ -62,8 +86,10 @@ model Account {
   createdAt             DateTime
   updatedAt             DateTime
 
-  @@map("account")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@index([userId])
+  @@map("account")
 }
 
 model Verification {
@@ -74,6 +100,132 @@ model Verification {
   createdAt  DateTime?
   updatedAt  DateTime?
 
-  @@map("verification")
   @@index([identifier])
+  @@map("verification")
+}
+
+// ===============================
+// ORGANISATION & RBAC
+// ===============================
+
+model Organization {
+  id               String    @id @default(cuid())
+  name             String
+  stripeCustomerId String?
+  plan             String    @default("FREE")
+  trialEndsAt      DateTime?
+
+  memberships Membership[]
+  properties  Property[]
+}
+
+model Membership {
+  id             String   @id @default(cuid())
+  role           Role
+  userId         String
+  organizationId String
+  createdAt      DateTime @default(now())
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+}
+
+// ===============================
+// FASTIGHETER
+// ===============================
+
+model Property {
+  id         String @id @default(cuid())
+  name       String // "Vasagatan 12"
+  street     String
+  city       String
+  postalCode String
+  country    String @default("SE")
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  units Unit[]
+
+  createdAt DateTime @default(now())
+}
+
+// ===============================
+// ENHETER (LÄGENHETER / LOKALER)
+// ===============================
+
+model Unit {
+  id      String     @id @default(cuid())
+  label   String // "12A"
+  type    String // "2 rum och kök"
+  size    String // "62 kvm"
+  rent    Int
+  deposit Int
+  status  UnitStatus @default(OCCUPIED)
+
+  contractStart DateTime
+  contractEnd   DateTime
+
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  tenant    Tenant?
+  payments  Payment[]
+  documents Document[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([propertyId, label])
+}
+
+// ===============================
+// HYRESGÄST
+// ===============================
+
+model Tenant {
+  id             String   @id @default(cuid())
+  name           String
+  email          String
+  phone          String
+  personalNumber String
+  moveInDate     DateTime
+
+  unitId String @unique
+  unit   Unit   @relation(fields: [unitId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+}
+
+// ===============================
+// BETALNINGAR
+// ===============================
+
+model Payment {
+  id       String        @id @default(cuid())
+  month    String // "Januari 2026"
+  dueDate  DateTime
+  paidDate DateTime?
+  amount   Int
+  status   PaymentStatus
+
+  unitId String
+  unit   Unit   @relation(fields: [unitId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+}
+
+// ===============================
+// DOKUMENT
+// ===============================
+
+model Document {
+  id         String   @id @default(cuid())
+  name       String
+  type       String // "Kontrakt", "Kvitto"
+  uploadedAt DateTime @default(now())
+
+  unitId String
+  unit   Unit   @relation(fields: [unitId], references: [id], onDelete: Cascade)
 }
