@@ -1,5 +1,3 @@
-// app/dashboard/properties/[propertyId]/units/[unitId]/page.tsx
-
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import {
@@ -27,37 +25,26 @@ import {
 } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 
+import prisma from "@/lib/prisma";
+import { getServerSession } from "@/lib/get-session";
 import { AssignTenantDialog } from "./_components/assign-tentant-dialog";
 
-import prisma from "@/lib/prisma";
-import { auth } from "@/lib/auth";
-import { getServerSession } from "@/lib/get-session";
-
 /* ======================================================
-   DATA
+   DATA FETCHING
 ====================================================== */
-
-async function getUnitData({
-  propertyId,
-  unitId,
-}: {
-  propertyId: string;
-  unitId: string;
-}) {
+async function getUnitData(propertyId: string, unitId: string) {
   const session = await getServerSession();
-  const user = session?.user;
-  if (!user) {
-    redirect("/sign-in");
-  }
+  if (!session?.user) redirect("/sign-in");
 
+  // 🔐 Säkerställ organisationstillhörighet
   const membership = await prisma.membership.findFirst({
-    where: { userId: user.id },
+    where: { userId: session.user.id },
+    select: { organizationId: true },
   });
 
-  if (!membership) {
-    redirect("/sign-in");
-  }
+  if (!membership) redirect("/sign-in");
 
+  // 🔹 Hämta enhet + ev. aktivt kontrakt + tenant
   const unit = await prisma.unit.findFirst({
     where: {
       id: unitId,
@@ -67,43 +54,43 @@ async function getUnitData({
       },
     },
     include: {
-      tenant: true,
-      payments: {
-        orderBy: { dueDate: "desc" },
-      },
-      documents: {
-        orderBy: { uploadedAt: "desc" },
+      tenant: true, // direkt koppling
+      contracts: {
+        where: { status: "ACTIVE" },
+        include: { tenant: true },
+        orderBy: { startDate: "desc" },
+        take: 1,
       },
     },
   });
 
-  if (!unit) {
-    notFound();
-  }
+  if (!unit) notFound();
 
-  const contractEndInDays = Math.max(
-    0,
-    Math.ceil(
-      (unit.contractEnd.getTime() - Date.now()) /
-        (1000 * 60 * 60 * 24)
-    )
-  );
+  const activeContract = unit.contracts[0] ?? null;
+
+  // 🔑 ENDA SANNINGEN
+  const resolvedTenant =
+    activeContract?.tenant ?? unit.tenant ?? null;
+
+  const contractEndInDays =
+    activeContract?.endDate
+      ? Math.max(
+          0,
+          Math.ceil(
+            (activeContract.endDate.getTime() - Date.now()) /
+              (1000 * 60 * 60 * 24)
+          )
+        )
+      : null;
 
   return {
-    unit: {
-      id: unit.id,
-      label: unit.label,
-      type: unit.type,
-      size: unit.size,
-      rent: unit.rent,
-      status: unit.status,
-      contractEndInDays,
-    },
-    tenant: unit.tenant,
-    payments: unit.payments,
-    documents: unit.documents,
+    unit,
+    contract: activeContract,
+    tenant: resolvedTenant,
+    contractEndInDays,
   };
 }
+
 
 /* ======================================================
    PAGE
@@ -112,10 +99,12 @@ async function getUnitData({
 export default async function UnitDetailPage({
   params,
 }: {
-  params: { propertyId: string; unitId: string };
+  params: Promise<{ propertyId: string; unitId: string }>;
 }) {
-  const { unit, tenant } = await getUnitData(params);
-  const isOccupied = !!tenant;
+  const {propertyId, unitId} = await params
+  const { unit, tenant, contract, contractEndInDays } = await getUnitData(propertyId, unitId);
+
+  const isOccupied = Boolean(tenant);
 
   return (
     <div className="space-y-6">
@@ -123,9 +112,7 @@ export default async function UnitDetailPage({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
           <Button asChild variant="outline" size="icon">
-            <Link
-              href={`/dashboard/properties/${params.propertyId}`}
-            >
+            <Link href={`/dashboard/properties/${propertyId}`}>
               <ArrowLeft className="h-4 w-4" />
             </Link>
           </Button>
@@ -135,7 +122,7 @@ export default async function UnitDetailPage({
               Enhet {unit.label}
             </h1>
             <p className="text-muted-foreground">
-              {unit.type} • {unit.size}
+              {unit.type} • {unit.sizeSqm} kvm
             </p>
           </div>
         </div>
@@ -179,15 +166,19 @@ export default async function UnitDetailPage({
             <StatCard
               icon={<DollarSign />}
               label="Månadshyra"
-              value={`${unit.rent.toLocaleString(
-                "sv-SE"
-              )} kr`}
+              value={`${unit.rent.toLocaleString("sv-SE")} kr`}
             />
+
             <StatCard
               icon={<Calendar />}
               label="Avtal slut"
-              value={`${unit.contractEndInDays} dagar`}
+              value={
+                contractEndInDays !== null
+                  ? `${contractEndInDays} dagar`
+                  : "Tillsvidare"
+              }
             />
+
             <StatCard
               icon={<CheckCircle />}
               label="Status"
@@ -200,17 +191,15 @@ export default async function UnitDetailPage({
               <CardTitle>Hyresgäst</CardTitle>
               <CardDescription>
                 {isOccupied
-                  ? "Aktiv hyresgäst"
+                  ? "Aktivt kontrakt"
                   : "Ingen hyresgäst kopplad"}
               </CardDescription>
             </CardHeader>
 
             <CardContent className="space-y-4">
-              {isOccupied && tenant && (
+              {tenant ? (
                 <>
-                  <p className="font-medium">
-                    {tenant.name}
-                  </p>
+                  <p className="font-medium">{tenant.name}</p>
 
                   <Separator />
 
@@ -225,6 +214,10 @@ export default async function UnitDetailPage({
                     </div>
                   </div>
                 </>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Ingen hyresgäst kopplad till enheten.
+                </p>
               )}
             </CardContent>
           </Card>
@@ -251,16 +244,12 @@ function StatCard({
     <Card>
       <CardContent className="pt-6">
         <div className="flex items-center gap-3">
-          <div className="text-muted-foreground">
-            {icon}
-          </div>
+          <div className="text-muted-foreground">{icon}</div>
           <div>
             <p className="text-sm text-muted-foreground">
               {label}
             </p>
-            <p className="text-xl font-semibold">
-              {value}
-            </p>
+            <p className="text-xl font-semibold">{value}</p>
           </div>
         </div>
       </CardContent>

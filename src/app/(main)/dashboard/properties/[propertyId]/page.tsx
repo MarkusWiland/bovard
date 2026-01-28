@@ -1,52 +1,62 @@
-// app/dashboard/properties/[propertyId]/page.tsx
-
 import { notFound, redirect } from "next/navigation";
+import prisma from "@/lib/prisma";
+import { getServerSession } from "@/lib/get-session";
+
 import { CreateUnitDialog } from "./_components/create-unit-dialog";
 import { UnitsTable, UnitRow } from "./_components/units-table";
-
-
-import { auth } from "@/lib/auth";
-import { getServerSession } from "@/lib/get-session";
-import prisma from "@/lib/prisma";
 
 /* ======================================================
    DATA FETCHING
 ====================================================== */
 
 async function getPropertyWithUnits(propertyId: string) {
+  // 🔐 Auth
   const session = await getServerSession();
-  const user = session?.user;
-  if (!user) {
+  if (!session?.user) {
     redirect("/sign-in");
   }
+
+  // 🔐 Organisation
   const organization = await prisma.organization.findFirst({
-    where: { memberships: { some: { userId: user.id } } },
+    where: {
+      memberships: {
+        some: { userId: session.user.id },
+      },
+    },
+    select: { id: true },
   });
+
   if (!organization) {
     redirect("/sign-in");
   }
-  const membership = await prisma.membership.findFirst({
-    where: { userId: user.id },
-    include: { organization: true },
-  });
-  if (!membership) {
-    redirect("/sign-in");
-  }
+
+  // 🏢 Property + Units
   const property = await prisma.property.findFirst({
     where: {
       id: propertyId,
-      organizationId: organization?.id,
+      organizationId: organization.id,
     },
     include: {
       units: {
+        orderBy: { label: "asc" },
         include: {
-          tenant: true,
+          // 🔹 Aktivt kontrakt (om finns)
+          contracts: {
+            where: { status: "ACTIVE" },
+            take: 1,
+            include: {
+              tenant: {
+                select: { name: true },
+              },
+            },
+          },
+
+          // 🔹 Senaste betalning
           payments: {
             orderBy: { dueDate: "desc" },
             take: 1,
           },
         },
-        orderBy: { label: "asc" },
       },
     },
   });
@@ -60,11 +70,12 @@ async function getPropertyWithUnits(propertyId: string) {
   ========================= */
 
   const units: UnitRow[] = property.units.map((unit) => {
+    const activeContract = unit.contracts[0];
     const latestPayment = unit.payments[0];
 
     let status: UnitRow["status"] = "vacant";
 
-    if (unit.tenant) {
+    if (activeContract) {
       if (latestPayment?.status === "LATE") {
         status = "late";
       } else {
@@ -77,8 +88,8 @@ async function getPropertyWithUnits(propertyId: string) {
       label: unit.label,
       rent: unit.rent,
       status,
-      tenant: unit.tenant
-        ? { name: unit.tenant.name }
+      tenant: activeContract
+        ? { name: activeContract.tenant.name }
         : null,
     };
   });
@@ -100,19 +111,19 @@ async function getPropertyWithUnits(propertyId: string) {
 export default async function PropertyPage({
   params,
 }: {
-  params: { propertyId: string };
+  params: Promise<{ propertyId: string }>;
 }) {
-  const { property, units } =
-    await getPropertyWithUnits(params.propertyId);
+  const {propertyId} = await params
+  const { property, units } = await getPropertyWithUnits(
+    propertyId
+  );
 
   return (
     <div className="space-y-6">
       {/* HEADER */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold">
-            {property.name}
-          </h1>
+          <h1 className="text-3xl font-bold">{property.name}</h1>
           <p className="text-muted-foreground">
             Hantera enheter i fastigheten
           </p>

@@ -1,20 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
 } from "@/components/ui/dialog";
-import {
-  Tabs,
-  TabsList,
-  TabsTrigger,
-  TabsContent,
-} from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Separator } from "@/components/ui/separator";
 import {
   Form,
   FormField,
@@ -26,114 +24,260 @@ import {
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Separator } from "@/components/ui/separator";
+import { User, UserPlus, Building2, Loader2, Check } from "lucide-react";
+import { toast } from "sonner";
+import { assignExistingTenant, createAndAssignTenant, getAssignableTenants } from "../../../../actions/tenant-action";
 
-/* ================= SCHEMA ================= */
 
-const createTenantSchema = z.object({
+
+/* ======================================================
+   SCHEMA
+====================================================== */
+
+const formSchema = z.object({
   name: z.string().min(1, "Namn krävs"),
-  email: z.string().email().optional(),
-  phone: z.string().optional(),
+  email: z.string().email("Ogiltig e-postadress"),
+  phone: z.string().min(1, "Telefon krävs"),
+  personalNumber: z.string().optional(),
 });
 
-type FormValues = z.infer<typeof createTenantSchema>;
+type FormData = z.infer<typeof formSchema>;
 
-type AssignTenantDialogProps = {
+/* ======================================================
+   TYPES
+====================================================== */
+
+interface Props {
   unitId: string;
-  mode: "assign" | "replace";
-  currentTenant?: {
-    name: string;
-    email?: string;
-    phone?: string;
-  };
-  triggerLabel?: string;
-  triggerVariant?: "default" | "outline";
-};
+  unitLabel?: string;
+  propertyName?: string;
+  currentTenant?: { id: string; name: string } | null;
+  trigger?: React.ReactNode;
+}
 
-/* ================= MOCK: BEFINTLIGA HYRESGÄSTER ================= */
-
-const existingTenants = [
-  {
-    id: "t1",
-    name: "Anna Andersson",
-    email: "anna@email.com",
-    phone: "070-123 45 67",
-  },
-  {
-    id: "t2",
-    name: "Erik Svensson",
-    email: "erik@email.com",
-    phone: "070-987 65 43",
-  },
-];
+/* ======================================================
+   COMPONENT
+====================================================== */
 
 export function AssignTenantDialog({
   unitId,
-  mode,
+  unitLabel,
+  propertyName,
   currentTenant,
-  triggerLabel = "Koppla hyresgäst",
-  triggerVariant = "default",
-}: AssignTenantDialogProps) {
+  trigger,
+}: Props) {
+  const router = useRouter();
   const [open, setOpen] = useState(false);
+  const [isPending, startTransition] = useTransition();
+  const [isLoading, setIsLoading] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const form = useForm<FormValues>({
-    resolver: zodResolver(createTenantSchema),
-    defaultValues: {
-      name: "",
-      email: "",
-      phone: "",
-    },
+  const [unassigned, setUnassigned] = useState<
+    Array<{ id: string; name: string; email: string; phone: string }>
+  >([]);
+  const [assigned, setAssigned] = useState<
+    Array<{ id: string; name: string; email: string; currentUnit: string }>
+  >([]);
+
+  const form = useForm<FormData>({
+    resolver: zodResolver(formSchema),
+    defaultValues: { name: "", email: "", phone: "", personalNumber: "" },
   });
 
-  async function onSubmit(values: FormValues) {
-    if (mode === "replace") {
-      // 1. avsluta nuvarande hyresgäst (moveOutDate)
-      // 2. skapa ny lease
-    }
+  const isReplace = !!currentTenant;
 
-    // await assignTenantToUnit({ unitId, tenant: values })
+  /* ======================================================
+     LOAD TENANTS
+  ====================================================== */
 
-    console.log("SUBMIT", { unitId, values, mode });
-    form.reset();
-    setOpen(false);
+  useEffect(() => {
+    if (!open) return;
+
+    setIsLoading(true);
+    getAssignableTenants()
+      .then((data: any) => {
+        console.log("data", data)
+        setUnassigned(data.unassigned);
+        setAssigned(data.assigned);
+      })
+      .catch(() => toast.error("Kunde inte ladda hyresgäster"))
+      .finally(() => setIsLoading(false));
+  }, [open]);
+
+  /* ======================================================
+     HANDLERS
+  ====================================================== */
+
+  function handleAssign(tenantId: string) {
+    setSelectedId(tenantId);
+
+    startTransition(async () => {
+      try {
+        await assignExistingTenant({ tenantId, unitId });
+        toast.success("Hyresgäst kopplad!");
+        setOpen(false);
+        router.refresh();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Något gick fel");
+        setSelectedId(null);
+      }
+    });
   }
+
+  function handleCreate(values: FormData) {
+    startTransition(async () => {
+      try {
+        await createAndAssignTenant({ ...values, unitId });
+        toast.success("Hyresgäst skapad och kopplad!");
+        setOpen(false);
+        form.reset();
+        router.refresh();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Något gick fel");
+      }
+    });
+  }
+
+  /* ======================================================
+     RENDER
+  ====================================================== */
 
   return (
     <>
-      <Button variant={triggerVariant} onClick={() => setOpen(true)}>
-        {triggerLabel}
-      </Button>
+      {trigger ? (
+        <span onClick={() => setOpen(true)} className="cursor-pointer">
+          {trigger}
+        </span>
+      ) : (
+        <Button onClick={() => setOpen(true)}>
+          <UserPlus className="mr-2 h-4 w-4" />
+          {isReplace ? "Byt hyresgäst" : "Koppla hyresgäst"}
+        </Button>
+      )}
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>
-              {mode === "assign"
-                ? "Koppla hyresgäst"
-                : "Byt hyresgäst"}
+              {isReplace ? "Byt hyresgäst" : "Koppla hyresgäst"}
             </DialogTitle>
+            {(propertyName || unitLabel) && (
+              <DialogDescription>
+                {[propertyName, unitLabel].filter(Boolean).join(" – ")}
+              </DialogDescription>
+            )}
           </DialogHeader>
 
-          {mode === "replace" && currentTenant && (
-            <div className="rounded-lg bg-muted p-3 text-sm">
-              <p className="font-medium">Nuvarande hyresgäst</p>
-              <p>{currentTenant.name}</p>
+          {/* Nuvarande hyresgäst */}
+          {currentTenant && (
+            <div className="flex items-center gap-3 rounded-lg bg-muted p-3">
+              <User className="h-4 w-4 text-muted-foreground" />
+              <div className="text-sm">
+                <span className="text-muted-foreground">Nuvarande: </span>
+                <span className="font-medium">{currentTenant.name}</span>
+              </div>
             </div>
           )}
 
-          <Tabs defaultValue="new" className="mt-4">
-            <TabsList className="grid grid-cols-2">
-              <TabsTrigger value="new">Ny hyresgäst</TabsTrigger>
-              <TabsTrigger value="existing">
-                Befintlig
-              </TabsTrigger>
+          <Tabs defaultValue="existing" className="mt-2">
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="existing">Befintlig</TabsTrigger>
+              <TabsTrigger value="new">Skapa ny</TabsTrigger>
             </TabsList>
 
-            {/* ================= NY HYRESGÄST ================= */}
-            <TabsContent value="new">
+            {/* ========== BEFINTLIGA ========== */}
+            <TabsContent value="existing" className="mt-4 space-y-4">
+              {isLoading ? (
+                <div className="flex justify-center py-8">
+                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                </div>
+              ) : (
+                <>
+                  {/* Lediga */}
+                  <div className="space-y-2">
+                    <h4 className="text-sm font-medium flex items-center gap-2">
+                      <span className="h-2 w-2 rounded-full bg-green-500" />
+                      Lediga ({unassigned.length})
+                    </h4>
+
+                    {unassigned.length === 0 ? (
+                      <p className="text-sm text-muted-foreground text-center py-4 border rounded-lg border-dashed">
+                        Inga lediga hyresgäster
+                      </p>
+                    ) : (
+                      <div className="space-y-2 max-h-[200px] overflow-y-auto">
+                        {unassigned.map((t) => (
+                          <div
+                            key={t.id}
+                            className="flex items-center justify-between p-3 border rounded-lg hover:bg-muted/50 transition-colors"
+                          >
+                            <div className="min-w-0">
+                              <p className="font-medium text-sm truncate">
+                                {t.name}
+                              </p>
+                              <p className="text-xs text-muted-foreground truncate">
+                                {t.email}
+                              </p>
+                            </div>
+                            <Button
+                              size="sm"
+                              onClick={() => handleAssign(t.id)}
+                              disabled={isPending}
+                            >
+                              {isPending && selectedId === t.id ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <>
+                                  <Check className="h-3 w-3 mr-1" />
+                                  Välj
+                                </>
+                              )}
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <Separator />
+
+                  {/* Kopplade */}
+                  <div className="space-y-2">
+                    <h4 className="text-sm font-medium flex items-center gap-2">
+                      <span className="h-2 w-2 rounded-full bg-amber-500" />
+                      Redan kopplade ({assigned.length})
+                    </h4>
+
+                    {assigned.length > 0 && (
+                      <div className="space-y-2 max-h-[150px] overflow-y-auto">
+                        {assigned.map((t) => (
+                          <div
+                            key={t.id}
+                            className="flex items-center gap-3 p-3 border rounded-lg opacity-60"
+                          >
+                            <Building2 className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                            <div className="min-w-0">
+                              <p className="font-medium text-sm truncate">
+                                {t.name}
+                              </p>
+                              <p className="text-xs text-muted-foreground truncate">
+                                {t.currentUnit}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </TabsContent>
+
+            {/* ========== SKAPA NY ========== */}
+            <TabsContent value="new" className="mt-4">
               <Form {...form}>
                 <form
-                  onSubmit={form.handleSubmit(onSubmit)}
+                  onSubmit={form.handleSubmit(handleCreate)}
                   className="space-y-4"
                 >
                   <FormField
@@ -141,84 +285,85 @@ export function AssignTenantDialog({
                     name="name"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Namn</FormLabel>
+                        <FormLabel>Namn *</FormLabel>
                         <FormControl>
-                          <Input {...field} />
+                          <Input
+                            placeholder="Anna Andersson"
+                            disabled={isPending}
+                            {...field}
+                          />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
                     )}
                   />
 
+                  <div className="grid grid-cols-2 gap-3">
+                    <FormField
+                      control={form.control}
+                      name="email"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>E-post *</FormLabel>
+                          <FormControl>
+                            <Input
+                              type="email"
+                              placeholder="anna@mail.se"
+                              disabled={isPending}
+                              {...field}
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name="phone"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Telefon *</FormLabel>
+                          <FormControl>
+                            <Input
+                              placeholder="070-123 45 67"
+                              disabled={isPending}
+                              {...field}
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+
                   <FormField
                     control={form.control}
-                    name="email"
+                    name="personalNumber"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Email</FormLabel>
+                        <FormLabel>Personnummer</FormLabel>
                         <FormControl>
-                          <Input {...field} />
+                          <Input
+                            placeholder="ÅÅÅÅMMDD-XXXX"
+                            disabled={isPending}
+                            {...field}
+                          />
                         </FormControl>
                       </FormItem>
                     )}
                   />
 
-                  <FormField
-                    control={form.control}
-                    name="phone"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Telefon</FormLabel>
-                        <FormControl>
-                          <Input {...field} />
-                        </FormControl>
-                      </FormItem>
+                  <Button type="submit" className="w-full" disabled={isPending}>
+                    {isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                    ) : (
+                      <UserPlus className="h-4 w-4 mr-2" />
                     )}
-                  />
-
-                  <Button type="submit" className="w-full">
-                    {mode === "assign"
-                      ? "Koppla hyresgäst"
-                      : "Byt hyresgäst"}
+                    Skapa & koppla
                   </Button>
                 </form>
               </Form>
-            </TabsContent>
-
-            {/* ================= BEFINTLIG ================= */}
-            <TabsContent value="existing" className="space-y-3">
-              <Input placeholder="Sök hyresgäst..." />
-
-              <Separator />
-
-              {existingTenants.map((tenant) => (
-                <div
-                  key={tenant.id}
-                  className="flex items-center justify-between rounded-lg border p-3"
-                >
-                  <div>
-                    <p className="font-medium">{tenant.name}</p>
-                    <p className="text-sm text-muted-foreground">
-                      {tenant.email}
-                    </p>
-                  </div>
-
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      console.log(
-                        "Koppla befintlig tenant",
-                        tenant.id,
-                        "→",
-                        unitId
-                      );
-                      setOpen(false);
-                    }}
-                  >
-                    Välj
-                  </Button>
-                </div>
-              ))}
             </TabsContent>
           </Tabs>
         </DialogContent>

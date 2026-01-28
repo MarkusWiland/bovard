@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { redirect } from "next/navigation";
 import {
   Card,
   CardContent,
@@ -7,12 +8,11 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
-import { StatsCards } from "./_components/stats-card";
 import { PropertiesList } from "./_components/properties-list";
+import { StatsCards } from "./_components/stats-card";
 import { RecentActivity } from "./_components/recent-activity";
 import { UpcomingTasks } from "./_components/upcoming-task";
 import { QuickActions } from "./_components/quick-actions";
-
 import {
   ActivitySkeleton,
   PropertiesListSkeleton,
@@ -20,170 +20,204 @@ import {
   TasksSkeleton,
 } from "./_components/skeleton-comps";
 
-import { auth } from "@/lib/auth";
-
 import { getServerSession } from "@/lib/get-session";
-import { redirect } from "next/navigation";
 import prisma from "@/lib/prisma";
+import { getDashboardStats } from "./actions";
 
 /* ======================================================
-   DATA FETCHING (SERVER)
+   AUTH - Hämta organizationId säkert
+====================================================== */
+
+async function getOrganizationId(): Promise<string> {
+  const session = await getServerSession();
+
+  if (!session?.user?.id) {
+    redirect("/sign-in");
+  }
+
+  const membership = await prisma.membership.findFirst({
+    where: { userId: session.user.id },
+    select: { organizationId: true },
+  });
+
+  if (!membership?.organizationId) {
+    redirect("/onboarding");
+  }
+
+  return membership.organizationId;
+}
+
+/* ======================================================
+   DATA FETCHING
 ====================================================== */
 
 async function getDashboardData() {
-      const session = await getServerSession();
-      const user = session?.user;
-      if (!user) {
-        redirect("/sign-in");
-      }
+  const organizationId = await getOrganizationId();
 
-  const membership = await prisma.membership.findFirst({
-    where: { userId: user.id },
-    include: { organization: true },
-  });
-
-  if (!membership) {
-    throw new Error("User has no organization");
-  }
-
-  const organizationId = membership.organizationId;
-
-  /* =========================
-     PROPERTIES + UNITS
-  ========================= */
-
-  const properties = await prisma.property.findMany({
-    where: { organizationId },
-    include: {
-      units: {
-        include: {
-          tenant: true,
-          payments: {
-            orderBy: { dueDate: "desc" },
-            take: 1,
+  const [properties, recentPayments, expiringContracts] = await Promise.all([
+    // 1. Alla fastigheter med units och aktiva kontrakt
+    prisma.property.findMany({
+      where: { organizationId },
+      include: {
+        units: {
+          include: {
+            contracts: {
+              where: { status: "ACTIVE" },
+              include: {
+                tenant: { select: { name: true } },
+              },
+            },
+            payments: {
+              orderBy: { dueDate: "desc" },
+              take: 1,
+              select: { status: true, amount: true },
+            },
           },
         },
       },
-    },
-  });
+      orderBy: { createdAt: "desc" },
+    }),
 
-  /* =========================
-     STATS
-  ========================= */
+    // 2. Senaste betalningar
+    prisma.payment.findMany({
+      where: {
+        unit: { property: { organizationId } },
+      },
+      include: {
+        unit: {
+          include: {
+            property: { select: { name: true } },
+            contracts: {
+              where: { status: "ACTIVE" },
+              include: {
+                tenant: { select: { name: true } },
+              },
+              take: 1,
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 5,
+    }),
 
-  const totalProperties = properties.length;
+    // 3. Kontrakt som löper ut inom 60 dagar
+    prisma.contract.findMany({
+      where: {
+        status: "ACTIVE",
+        unit: { property: { organizationId } },
+        endDate: {
+          lte: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000),
+          gte: new Date(),
+        },
+      },
+      include: {
+        tenant: { select: { name: true } },
+        unit: {
+          include: {
+            property: { select: { name: true } },
+          },
+        },
+      },
+      orderBy: { endDate: "asc" },
+      take: 5,
+    }),
+  ]);
 
-  const monthlyRent = properties
-    .flatMap((p) => p.units)
-    .reduce((sum, unit) => sum + unit.rent, 0);
+  /* ======================================================
+     BERÄKNA STATS & PROPERTIES LIST
+  ====================================================== */
 
-  const activeContracts = properties
-    .flatMap((p) => p.units)
-    .filter((u) => u.tenant).length;
+  let totalMonthlyRent = 0;
+  let activeContractsCount = 0;
+  let paidCount = 0;
+  let occupiedUnitsCount = 0;
 
-  const paidUnits = properties
-    .flatMap((p) => p.units)
-    .filter(
-      (u) =>
-        u.payments[0] &&
-        u.payments[0].status === "PAID"
-    ).length;
+  const propertiesList = properties.map((property) => {
+    let propertyRent = 0;
+    let tenantCount = 0;
+    let hasLatePayment = false;
 
-  const paidPercentage =
-    activeContracts === 0
-      ? 0
-      : Math.round((paidUnits / activeContracts) * 100);
+    for (const unit of property.units) {
+      // Räkna hyra för alla units
+      propertyRent += unit.rent;
 
-  /* =========================
-     PROPERTIES LIST
-  ========================= */
+      // Kolla om unit har aktivt kontrakt (= hyresgäst)
+      const activeContract = unit.contracts[0];
+      if (activeContract) {
+        tenantCount++;
+        activeContractsCount++;
+        occupiedUnitsCount++;
 
-  const propertiesList = properties.map((p) => {
-    const totalRent = p.units.reduce(
-      (sum, u) => sum + u.rent,
-      0
-    );
+        // Kolla senaste betalning
+        const lastPayment = unit.payments[0];
+        if (lastPayment) {
+          if (lastPayment.status === "PAID") {
+            paidCount++;
+          } else if (lastPayment.status === "LATE") {
+            hasLatePayment = true;
+          }
+        }
+      }
+    }
 
-    const hasLatePayment = p.units.some(
-      (u) => u.payments[0]?.status === "LATE"
-    );
+    totalMonthlyRent += propertyRent;
 
     return {
-      id: p.id,
-      address: p.name,
-      city: p.city,
-      tenants: p.units.filter((u) => u.tenant).length,
-      rent: totalRent,
-      status: hasLatePayment ? "pending" : "paid",
-    } as const;
+      id: property.id,
+      address: property.name,
+      city: property.city,
+      tenants: tenantCount,
+      rent: propertyRent,
+      status: hasLatePayment ? ("pending" as const) : ("paid" as const),
+    };
   });
 
-  /* =========================
-     RECENT ACTIVITY
-  ========================= */
+  // Beräkna procent betalda
+  const paidPercentage =
+    occupiedUnitsCount > 0
+      ? Math.round((paidCount / occupiedUnitsCount) * 100)
+      : 100;
 
-  const recentPayments = await prisma.payment.findMany({
-    where: {
-      unit: {
-        property: {
-          organizationId,
-        },
-      },
-    },
-    include: {
-      unit: {
-        include: {
-          tenant: true,
-          property: true,
-        },
-      },
-    },
-    orderBy: { createdAt: "desc" },
-    take: 5,
+  /* ======================================================
+     FORMATERA AKTIVITETER
+  ====================================================== */
+
+  const recentActivity = recentPayments.map((payment) => {
+    const activeContract = payment.unit.contracts[0];
+    const tenantName = activeContract?.tenant?.name ?? "Okänd hyresgäst";
+
+    return {
+      id: payment.id,
+      type: "payment" as const,
+      tenant: tenantName,
+      property: payment.unit.property.name,
+      date: payment.createdAt.toISOString().split("T")[0],
+      amount: payment.amount,
+    };
   });
 
-  const recentActivity = recentPayments.map((p) => ({
-    id: p.id,
-    type: "payment" as const,
-    tenant: p.unit.tenant?.name ?? "Okänd",
-    property: p.unit.property.name,
-    date: p.createdAt.toISOString().split("T")[0],
-    amount: p.amount,
-  }));
+  /* ======================================================
+     FORMATERA UPPGIFTER
+  ====================================================== */
 
-  /* =========================
-     UPCOMING TASKS
-  ========================= */
-
-  const upcomingContracts = await prisma.unit.findMany({
-    where: {
-      property: { organizationId },
-      contractEnd: {
-        lte: new Date(
-          Date.now() + 1000 * 60 * 60 * 24 * 60
-        ), // 60 dagar
-      },
-    },
-    include: {
-      property: true,
-    },
-    orderBy: { contractEnd: "asc" },
-    take: 5,
-  });
-
-  const upcomingTasks = upcomingContracts.map((u) => ({
-    id: u.id,
-    task: "Avtalsförnyelse",
-    property: u.property.name,
-    date: u.contractEnd.toISOString().split("T")[0],
+  const upcomingTasks = expiringContracts.map((contract) => ({
+    id: contract.id,
+    task: `Avtalsförnyelse - ${contract.tenant.name}`,
+    property: contract.unit.property.name,
+    date: contract.endDate!.toISOString().split("T")[0],
     priority: "high" as const,
   }));
 
+  /* ======================================================
+     RETURN
+  ====================================================== */
+
   return {
     stats: {
-      totalProperties,
-      monthlyRent,
-      activeContracts,
+      totalProperties: properties.length,
+      monthlyRent: totalMonthlyRent,
+      activeContracts: activeContractsCount,
       paidPercentage,
     },
     properties: propertiesList,
@@ -193,80 +227,78 @@ async function getDashboardData() {
 }
 
 /* ======================================================
-   PAGE
+   PAGE COMPONENT
 ====================================================== */
 
 export default async function DashboardPage() {
   const data = await getDashboardData();
-
+  const stats = await getDashboardStats()
   return (
-    <div className="flex min-h-screen w-full flex-col bg-muted/40">
-      <main className="flex-1 space-y-4 p-4 sm:p-6">
-        {/* Welcome */}
-        <div>
-          <h2 className="text-3xl font-bold tracking-tight">
-            Välkommen tillbaka!
-          </h2>
-          <p className="text-muted-foreground">
-            Här är en översikt av dina fastigheter
-          </p>
-        </div>
+    <div className="flex-1 space-y-6">
+      {/* Header */}
+      <div>
+        <h1 className="text-3xl font-bold tracking-tight">
+          Välkommen tillbaka!
+        </h1>
+        <p className="text-muted-foreground">
+          Här är en översikt av dina fastigheter
+        </p>
+      </div>
 
-        {/* Stats */}
-        <Suspense fallback={<StatsCardsSkeleton />}>
-          <StatsCards stats={data.stats} />
-        </Suspense>
+      {/* Stats */}
+      <Suspense fallback={<StatsCardsSkeleton />}>
+        <StatsCards stats={stats.stats} />
+      </Suspense>
 
-        {/* Main Grid */}
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-7">
-          <Card className="col-span-full lg:col-span-4">
-            <CardHeader>
-              <CardTitle>Dina fastigheter</CardTitle>
-              <CardDescription>
-                Översikt av alla dina hyresfastigheter
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Suspense fallback={<PropertiesListSkeleton />}>
-                <PropertiesList properties={data.properties} />
-              </Suspense>
-            </CardContent>
-          </Card>
-
-          <div className="col-span-full lg:col-span-3 space-y-4">
-            <QuickActions />
-
-            <Card>
-              <CardHeader>
-                <CardTitle>Kommande uppgifter</CardTitle>
-                <CardDescription>
-                  Saker som kräver din uppmärksamhet
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Suspense fallback={<TasksSkeleton />}>
-                  <UpcomingTasks tasks={data.upcomingTasks} />
-                </Suspense>
-              </CardContent>
-            </Card>
-          </div>
-        </div>
-
-        {/* Activity */}
-        <Card>
+      {/* Main Grid */}
+      <div className="grid gap-6 lg:grid-cols-7">
+        {/* Properties List */}
+        <Card className="lg:col-span-4">
           <CardHeader>
-            <CardTitle>Senaste aktiviteter</CardTitle>
+            <CardTitle>Dina fastigheter</CardTitle>
             <CardDescription>
-              Nyliga händelser i dina fastigheter
+              {data.properties.length > 0
+                ? `${data.properties.length} fastighet${data.properties.length > 1 ? "er" : ""} registrerad${data.properties.length > 1 ? "e" : ""}`
+                : "Lägg till din första fastighet för att komma igång"}
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <Suspense fallback={<ActivitySkeleton />}>
-              <RecentActivity activities={data.recentActivity} />
+            <Suspense fallback={<PropertiesListSkeleton />}>
+              <PropertiesList properties={data.properties} />
             </Suspense>
           </CardContent>
         </Card>
-      </main>
+
+        {/* Sidebar */}
+        <div className="lg:col-span-3 space-y-6">
+          <QuickActions />
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Kommande uppgifter</CardTitle>
+              <CardDescription>Avtal som snart löper ut</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Suspense fallback={<TasksSkeleton />}>
+                <UpcomingTasks tasks={data.upcomingTasks} />
+              </Suspense>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+
+      {/* Recent Activity */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Senaste aktiviteter</CardTitle>
+          <CardDescription>Nyliga betalningar och händelser</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Suspense fallback={<ActivitySkeleton />}>
+            <RecentActivity activities={data.recentActivity} />
+          </Suspense>
+        </CardContent>
+      </Card>
     </div>
   );
 }

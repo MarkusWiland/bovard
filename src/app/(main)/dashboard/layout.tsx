@@ -3,12 +3,19 @@ import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { SidebarNav } from "./_components/sidebar-nav";
 import { DashboardHeader } from "./_components/dashboard-header";
+import { getServerSession } from "@/lib/get-session";
+import { redirect } from "next/navigation";
 
-export default function DashboardLayout({
+export default async function DashboardLayout({
   children,
 }: {
   children: ReactNode;
 }) {
+  const session = await getServerSession()
+  const user = session?.user
+  if(!user) {
+    redirect("/sign-up")
+  }
   return (
     <div className="flex min-h-screen bg-muted/40">
       {/* SIDEBAR */}
@@ -39,6 +46,11 @@ export default function DashboardLayout({
                   {
                     title: "Dokument",
                     href: "/dashboard/documents",
+                    icon: "file",
+                  },
+                  {
+                    title: "Avtalmallar",
+                    href: "/dashboard/avtalsmallar",
                     icon: "file",
                   },
                   {

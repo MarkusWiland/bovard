@@ -108,8 +108,15 @@ export async function createUnit(data: {
       size: "62",
       deposit: 0,
       status: "VACANT",
-      contractStart: new Date(),
-      contractEnd: addYears(new Date(), 1),
+      contracts: {  
+        create: {
+          startDate: new Date(),
+          endDate: addYears(new Date(), 1),
+          data: {},
+          tenantId: user!.id,
+          templateId: "1",
+        },
+      },
     },
   });
   return { ok: true, unit: unit };

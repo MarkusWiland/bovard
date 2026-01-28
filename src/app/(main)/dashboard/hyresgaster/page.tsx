@@ -7,38 +7,36 @@ import {
   CardContent,
 } from "@/components/ui/card";
 import { TenantsTable } from "./_components/tenants-table";
+import prisma from "@/lib/prisma";
+import { Button } from "@/components/ui/button";
+import { Link, Plus } from "lucide-react";
+import { CreateTenantButton } from "@/components/buttons/create-tenant-button";
 
 /* ================= MOCK DATA ================= */
 
+
+
 async function getTenants() {
-  return [
-    {
-      id: "t1",
-      name: "Anna Andersson",
-      email: "anna@email.com",
-      phone: "070-123 45 67",
-      moveInDate: "2024-01-01",
-      rent: 12500,
-      unit: { id: "u1", label: "12A" },
-      property: { id: "p1", name: "Vasagatan 12" },
-      status: "active",
+  const tenants = await prisma.tenant.findMany({
+    include: {
+      contracts: {
+        where: { status: "ACTIVE" },
+        take: 1,
+        include: {
+          template: true,
+          unit: {
+            include: {
+              property: true,
+            },
+          },
+        },
+      },
     },
-    {
-      id: "t2",
-      name: "Erik Svensson",
-      email: "erik@email.com",
-      phone: "070-987 65 43",
-      moveInDate: "2023-06-01",
-      rent: 11500,
-      unit: { id: "u2", label: "12B" },
-      property: { id: "p1", name: "Vasagatan 12" },
-      status: "late",
-    },
-  ] as const;
+  });
+  return tenants;
 }
 
-/* ================= PRISMA (AKTIVERA SEN) ================= */
-// samma prisma-query som tidigare, oförändrad
+
 
 export default async function TenantsPage() {
   const tenants = await getTenants();
@@ -53,11 +51,17 @@ export default async function TenantsPage() {
       </div>
 
       <Card>
-        <CardHeader>
+        <CardHeader className="flex justify-between items-center">
+          <div>
+
           <CardTitle>Hyresgäster</CardTitle>
           <CardDescription>
             Totalt {tenants.length} hyresgäster
           </CardDescription>
+          </div>
+          <div className="flex justify-end">
+          <CreateTenantButton />
+          </div>
         </CardHeader>
 
         <CardContent>

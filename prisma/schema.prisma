@@ -15,7 +15,6 @@ datasource db {
 // ===============================
 // ENUMS
 // ===============================
-
 enum Role {
   OWNER
   ADMIN
@@ -28,9 +27,24 @@ enum PaymentStatus {
   PENDING
 }
 
+enum ContractStatus {
+  DRAFT
+  ACTIVE
+  TERMINATED
+  EXPIRED
+}
+
+enum UnitType {
+  APARTMENT
+  OFFICE
+  STORAGE
+  PARKING
+}
+
 enum UnitStatus {
-  OCCUPIED
-  VACANT
+  VACANT // Ledig
+  OCCUPIED // Aktivt avtal
+  MAINTENANCE // Underhåll
 }
 
 // ===============================
@@ -117,6 +131,8 @@ model Organization {
 
   memberships Membership[]
   properties  Property[]
+
+  createdAt DateTime @default(now())
 }
 
 model Membership {
@@ -138,7 +154,7 @@ model Membership {
 
 model Property {
   id         String @id @default(cuid())
-  name       String // "Vasagatan 12"
+  name       String
   street     String
   city       String
   postalCode String
@@ -157,32 +173,97 @@ model Property {
 // ===============================
 
 model Unit {
-  id      String     @id @default(cuid())
-  label   String // "12A"
-  type    String // "2 rum och kök"
-  size    String // "62 kvm"
-  rent    Int
-  deposit Int
-  status  UnitStatus @default(OCCUPIED)
+  id String @id @default(cuid())
 
-  contractStart DateTime
-  contractEnd   DateTime
+  // 🔹 Identifiering
+  label   String // "12A", "LGH 1002"
+  type    UnitType // APARTMENT, OFFICE, STORAGE
+  rooms   Int // 2 (2 rum)
+  sizeSqm Int // 62 (kvm)
 
+  // 🔹 Ekonomi
+  rent     Int // månadsavgift i kr
+  deposit  Int? // valfritt
+  currency String @default("SEK")
+
+  // 🔹 Status
+  status UnitStatus @default(VACANT)
+
+  // 🔹 Relationer
   propertyId String
   property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
 
-  tenant    Tenant?
+  contracts Contract[]
   payments  Payment[]
+
+  // 🔹 Meta / UI
+  floor     Int?
+  note      String?
+  tenantId  String?
+  tenant    Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([propertyId, label])
+}
+
+model Contract {
+  id String @id @default(cuid())
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  unitId String
+  unit   Unit   @relation(fields: [unitId], references: [id], onDelete: Cascade)
+
+  templateId String
+  template   Template @relation(fields: [templateId], references: [id])
+
+  status    ContractStatus @default(DRAFT)
+  startDate DateTime
+  endDate   DateTime?
+
+  // Snapshot av ifyllda värden
+  data Json
+
   documents Document[]
 
   createdAt DateTime @default(now())
 
-  @@unique([propertyId, label])
+  @@index([tenantId])
+  @@index([unitId])
 }
 
 // ===============================
 // HYRESGÄST
 // ===============================
+model Template {
+  id          String  @id @default(cuid())
+  name        String
+  description String?
+  isDefault   Boolean @default(false)
+  isActive    Boolean @default(true)
+
+  variables TemplateVariable[]
+  contracts Contract[]
+
+  createdAt DateTime @default(now())
+}
+
+model TemplateVariable {
+  id         String   @id @default(cuid())
+  templateId String
+  template   Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  name        String
+  label       String
+  type        String
+  required    Boolean @default(false)
+  description String?
+  sortOrder   Int
+
+  @@unique([templateId, name])
+}
 
 model Tenant {
   id             String   @id @default(cuid())
@@ -192,10 +273,10 @@ model Tenant {
   personalNumber String
   moveInDate     DateTime
 
-  unitId String @unique
-  unit   Unit   @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  contracts Contract[]
 
   createdAt DateTime @default(now())
+  units     Unit[]
 }
 
 // ===============================
@@ -204,7 +285,7 @@ model Tenant {
 
 model Payment {
   id       String        @id @default(cuid())
-  month    String // "Januari 2026"
+  month    String
   dueDate  DateTime
   paidDate DateTime?
   amount   Int
@@ -223,9 +304,9 @@ model Payment {
 model Document {
   id         String   @id @default(cuid())
   name       String
-  type       String // "Kontrakt", "Kvitto"
+  type       String
   uploadedAt DateTime @default(now())
 
-  unitId String
-  unit   Unit   @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  contractId String
+  contract   Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
 }

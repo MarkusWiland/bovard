@@ -14,35 +14,53 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ArrowUpRight, Mail, Phone, Search } from "lucide-react";
+import prisma from "@/lib/prisma";
+import { Contract, ContractStatus } from "@/generated/prisma";
 
-type Tenant = {
+type TenantRow = {
   id: string;
   name: string;
-  email: string;
+  email: string;  
   phone: string;
-  moveInDate: string;
-  rent: number;
-  status: "active" | "late";
-  unit: { id: string; label: string };
-  property: { id: string; name: string };
+  moveInDate: Date;
+  contracts: {
+    id: string;
+    status: ContractStatus;
+    template: {
+      id: string;
+      name: string;
+    };
+    unit: {
+      id: string;
+      label: string;
+      rent: number;
+      property: {
+        id: string;
+        name: string;
+      };
+    };
+  }[];
 };
 
-export function TenantsTable({ tenants }: { tenants: Tenant[] }) {
+  
+export function TenantsTable({ tenants }: { tenants: TenantRow[] }) {
   const [query, setQuery] = useState("");
-
   const filteredTenants = useMemo(() => {
     const q = query.toLowerCase();
-
-    return tenants.filter((t) =>
-      [
+ 
+    return tenants.filter((t) => {
+      const contract = t.contracts[0];
+      return [
         t.name,
         t.email,
-        t.unit.label,
-        t.property.name,
-      ].some((field) => field.toLowerCase().includes(q))
-    );
+        contract?.unit.label,
+        contract?.unit.property.name,
+      ]
+        .filter(Boolean)
+        .some((field) => field!.toLowerCase().includes(q));
+    });
   }, [query, tenants]);
-
+  console.log("tenants", tenants);
   return (
     <div className="space-y-4">
       {/* SEARCH */}
@@ -65,6 +83,7 @@ export function TenantsTable({ tenants }: { tenants: Tenant[] }) {
             <TableHead>Enhet</TableHead>
             <TableHead>Fastighet</TableHead>
             <TableHead>Inflytt</TableHead>
+            <TableHead>Avtal</TableHead>
             <TableHead>Hyra</TableHead>
             <TableHead>Status</TableHead>
             <TableHead className="text-right" />
@@ -91,14 +110,17 @@ export function TenantsTable({ tenants }: { tenants: Tenant[] }) {
                 </div>
               </TableCell>
 
-              <TableCell>{tenant.unit.label}</TableCell>
+              <TableCell>
+  {tenant.contracts[0]?.unit?.label ?? "—"}
+</TableCell>
+
 
               <TableCell>
                 <Link
-                  href={`/dashboard/properties/${tenant.property.id}`}
+                  href={`/dashboard/properties/${tenant.contracts[0]?.unit?.property?.id}`}
                   className="hover:underline"
                 >
-                  {tenant.property.name}
+                  {tenant.contracts[0]?.unit?.property?.name}
                 </Link>
               </TableCell>
 
@@ -107,26 +129,45 @@ export function TenantsTable({ tenants }: { tenants: Tenant[] }) {
               </TableCell>
 
               <TableCell>
-                {tenant.rent.toLocaleString("sv-SE")} kr
+                {tenant.contracts[0]?.unit?.rent?.toLocaleString("sv-SE")} kr
               </TableCell>
 
               <TableCell>
-                {tenant.status === "active" && (
+                {tenant.contracts[0]?.status === "ACTIVE" && (
                   <Badge variant="default">Aktiv</Badge>
                 )}
-                {tenant.status === "late" && (
-                  <Badge variant="destructive">Försenad</Badge>
+                {tenant.contracts[0]?.status === "EXPIRED" && (
+                  <Badge variant="destructive">Utgången avtal</Badge>
+                )}
+                {tenant.contracts[0]?.status === "TERMINATED" && (
+                  <Badge variant="destructive">Avslutat</Badge>
+                )}
+                {tenant.contracts[0]?.status === "DRAFT" && (
+                  <Badge variant="secondary">Utkast</Badge>
                 )}
               </TableCell>
+              <TableCell>
+  {tenant.contracts[0]?.template.id ? (
+    <Badge variant="outline">
+      {tenant.contracts[0]?.template.name}
+    </Badge>
+  ) : (
+    <span className="text-muted-foreground text-sm">Inget avtal</span>
+  )}
+</TableCell>
 
               <TableCell className="text-right">
-                <Button asChild size="icon" variant="ghost">
-                  <Link
-                    href={`/dashboard/properties/${tenant.property.id}/units/${tenant.unit.id}`}
-                  >
-                    <ArrowUpRight className="h-4 w-4" />
-                  </Link>
-                </Button>
+              <Button
+  asChild
+  size="icon"
+  variant="ghost"
+  title="Visa hyresgäst"
+>
+  <Link href={`/dashboard/hyresgaster/${tenant.id}`}>
+    <ArrowUpRight className="h-4 w-4" />
+  </Link>
+</Button>
+
               </TableCell>
             </TableRow>
           ))}
